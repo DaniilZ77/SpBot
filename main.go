@@ -14,37 +14,37 @@ import (
 )
 
 const (
-	githubToken   = "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"
-	telegramToken = "6315259403:AAGo-T87jXeUXO7Fhk1KX2B6z_0cp9a56iU"
-)
-const owner = "DaniilZ77"
-const repo = "notes_spbu"
-const branch = "notes_without_changes"
-const fileNameSuffix = "_lectures.pdf"
-
-const (
-	calculus   = "Матан"
-	algebra    = "Алгебра"
-	discrete   = "Дискретка"
-	algorithms = "Алгосы"
+	githubToken    = "some_github_token"
+	telegramToken  = "some_telegram_token"
+	owner          = "DaniilZ77"
+	repo           = "notes_spbu"
+	branch         = "notes_without_changes"
+	fileNameSuffix = "_lectures.pdf"
+	calculus       = "Матан"
+	algebra        = "Алгебра"
+	discrete       = "Дискретка"
+	algorithms     = "Алгосы"
+	homeButtonText = "Назад"
 )
 
-var extensions = []string{
+var extensionsToLookFor = []string{
 	".pdf",
 }
 
-var subjectsMap = map[string]string{
+var subjectsToPathMap = map[string]string{
 	algebra:    "algebra",
 	calculus:   "matan",
 	discrete:   "discrete",
 	algorithms: "algorithms",
 }
-var lastCommand string
 
-const homeButtonText = "/start"
+type BotFile struct {
+	dir  string
+	name string
+}
 
 func checkExtensions(file string) bool {
-	for _, ext := range extensions {
+	for _, ext := range extensionsToLookFor {
 		if strings.HasSuffix(file, ext) {
 			return true
 		}
@@ -69,40 +69,48 @@ func handleStartMessage(c tele.Context) error {
 
 	err := c.Send("Выбери предмет", &replyKeyboard)
 	if err != nil {
-		log.Fatal("Проблема с отправкой клавиатуры: ", err)
+		log.Println("Ошибка отправки клавиатуры: ", err)
+		return err
 	}
 
 	return nil
 }
 
-func getContents(ctx context.Context, client *github.Client, dir string, file string) (*github.RepositoryContent, []*github.RepositoryContent, error) {
-	path := filepath.Join(dir, file)
+func getContents(ctx context.Context, client *github.Client, bf *BotFile, doRequestDir bool) (*github.RepositoryContent, []*github.RepositoryContent, error) {
+	path := filepath.Join(bf.dir, bf.name)
+	if doRequestDir {
+		path = filepath.Dir(bf.dir)
+	}
 	fileContent, directoryContent, _, err := client.Repositories.GetContents(ctx, owner, repo, path, &github.RepositoryContentGetOptions{Ref: branch})
 	if err != nil {
-		log.Println("Не удалось найти файл: " + path)
+		log.Println("Ошибка доступа к файлу: " + path)
+		log.Println(err)
 		return nil, nil, err
 	}
 	return fileContent, directoryContent, nil
 }
 
-func handleSubjectMessageHelper(c tele.Context, bot *tele.Bot, client *github.Client, ctx context.Context) error {
-	path, isIn := subjectsMap[c.Text()]
+func handleSubjectMessageHelper(ctx context.Context, c tele.Context, bot *tele.Bot, bf *BotFile, client *github.Client) error {
+	var ok bool
+	bf.dir, ok = subjectsToPathMap[c.Text()]
 
-	lastCommand = path
-
-	if !isIn {
-		log.Println("Такого предмета не существует")
+	if !ok {
+		log.Printf("Запросили предмет, которого не существует: %s\n", bf.dir)
 		_, err := bot.Send(c.Sender(), "Такого предмета не существует")
 		if err != nil {
-			log.Fatal("К сожалению бот не смог отправить сообщение")
+			log.Println("Ошибка отправки сообщения: " + err.Error())
+			return err
 		}
-		return err
+		return nil
 	}
 
-	_, directoryContent, err := getContents(ctx, client, path, "")
-	if err != nil || directoryContent == nil {
-		log.Println("Что то пошло не так")
+	_, directoryContent, err := getContents(ctx, client, bf, true)
+	if err != nil {
+		log.Println("Ошибка получения контента из репозитория: " + err.Error())
 		return err
+	} else if directoryContent == nil {
+		log.Println("Такой директории не сущетсвует: " + bf.dir)
+		return nil
 	}
 
 	var replyButtons [][]tele.ReplyButton
@@ -128,57 +136,50 @@ func handleSubjectMessageHelper(c tele.Context, bot *tele.Bot, client *github.Cl
 
 	err = c.Send("Выбери файл", &replyKeyboard)
 	if err != nil {
+		log.Println("Ошибка отправки клавиатуры: ", err)
 		return err
 	}
 
 	return nil
 }
 
-func handleGetFileMessage(c tele.Context, bot *tele.Bot, client *github.Client, ctx context.Context) error {
+func handleGetFileMessage(ctx context.Context, c tele.Context, bot *tele.Bot, bf *BotFile, client *github.Client) error {
 	text := c.Text()
-	fileContent, _, err := getContents(ctx, client, lastCommand, text)
-	if err != nil || fileContent == nil {
-		log.Println("Не удалось найти файл: ", err)
+	fileContent, _, err := getContents(ctx, client, bf, false)
+	if err != nil {
+		log.Println("Ошибка получения контента из репозитория: " + err.Error())
 		return err
+	} else if fileContent == nil {
+		log.Println("Такого файла не сущетсвует: " + bf.dir)
+		return nil
 	}
 
 	data, err := fileContent.GetContent()
 	if err != nil {
-		log.Println("Ошибка чтения контента: ", err)
-		_, err = bot.Send(c.Sender(), "Не могу прочитать файл")
-		if err != nil {
-			log.Fatal("Ошибка отправки сообщения ботом: ", err)
-		}
-		return nil
+		log.Println("Ошибка чтения контента из файла: " + err.Error())
+		return err
 	}
 
 	tempFile, err := os.CreateTemp("", "lecture_github.pdf")
 	if err != nil {
-		log.Println("Ошибка при создании временного файла: ", err)
-		_, err = bot.Send(c.Sender(), "Ошибка при создании временного файла")
-		if err != nil {
-			log.Fatal("Ошибка отправки сообщения ботом: ", err)
-		}
-		return nil
+		log.Println("Ошибка при создании временного файла: " + err.Error())
+		return err
 	}
+
 	defer func(tempFile *os.File) {
 		err := tempFile.Close()
 		if err != nil {
-			log.Fatal("Программа не смогла закрыть временный файл")
+			log.Println("Ошибка при закрытии временного файла: " + err.Error())
 		}
 	}(tempFile)
 
 	_, err = tempFile.Write([]byte(data))
 	if err != nil {
-		log.Println("Ошибка при записи во временный файл: ", err)
-		_, err = bot.Send(c.Sender(), "Ошибка при записи во временный файл")
-		if err != nil {
-			log.Fatal("Ошибка отправки сообщения ботом: ", err)
-		}
-		return nil
+		log.Println("Ошибка записи во временный файл: " + err.Error())
+		return err
 	}
 
-	fileName := filepath.Join(lastCommand, text)
+	fileName := filepath.Join(bf.dir, text)
 
 	pdf := &tele.Document{
 		File:     tele.FromDisk(tempFile.Name()),
@@ -187,30 +188,28 @@ func handleGetFileMessage(c tele.Context, bot *tele.Bot, client *github.Client, 
 
 	_, err = bot.Send(c.Sender(), pdf)
 	if err != nil {
-		log.Fatal("Ошибка отправки сообщения ботом: ", err)
+		log.Println("Ошибка отправки сообщения: " + err.Error())
+		return err
 	}
+
 	err = os.Remove(tempFile.Name())
 	if err != nil {
-		log.Println("Ошибка при удалении временного файла: ", err)
-		_, err = bot.Send(c.Sender(), "Ошибка при удалении временного файла")
-		if err != nil {
-			log.Fatal("Ошибка отправки сообщения ботом: ", err)
-		}
-		return nil
+		log.Println("Ошибка удаления временного файла: " + err.Error())
+		return err
 	}
 
 	return nil
 }
 
-func handleMessage(bot *tele.Bot, client *github.Client, ctx context.Context) func(c tele.Context) error {
+func handleMessage(ctx context.Context, bot *tele.Bot, bf *BotFile, client *github.Client) func(c tele.Context) error {
 	return func(c tele.Context) error {
-		text := c.Text()
+		message := c.Text()
 		var err error
 
-		if _, isIn := subjectsMap[text]; isIn {
-			err = handleSubjectMessageHelper(c, bot, client, ctx)
-		} else if checkExtensions(text) {
-			err = handleGetFileMessage(c, bot, client, ctx)
+		if _, ok := subjectsToPathMap[message]; ok {
+			err = handleSubjectMessageHelper(ctx, c, bot, bf, client)
+		} else if checkExtensions(message) {
+			err = handleGetFileMessage(ctx, c, bot, bf, client)
 		}
 		return err
 	}
@@ -222,23 +221,26 @@ func main() {
 	ts := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: githubToken},
 	)
+
 	tc := oauth2.NewClient(ctx, ts)
 	client := github.NewClient(tc)
 
-	pref := tele.Settings{
+	preferences := tele.Settings{
 		Token:  telegramToken,
 		Poller: &tele.LongPoller{Timeout: 10 * time.Second},
 	}
 
-	bot, err := tele.NewBot(pref)
+	bot, err := tele.NewBot(preferences)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Ошибка создания бота: ", err.Error())
 		return
 	}
 
+	bf := new(BotFile)
+
 	bot.Handle("/start", handleStartMessage)
-	//bot.Handle(tele.OnText, handleRequestLectureMessage(bot, client, ctx, err))
-	bot.Handle(tele.OnText, handleMessage(bot, client, ctx))
+	bot.Handle("Назад", handleStartMessage)
+	bot.Handle(tele.OnText, handleMessage(ctx, bot, bf, client))
 
 	bot.Start()
 }
