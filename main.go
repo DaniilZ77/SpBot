@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,38 +14,13 @@ import (
 	tele "gopkg.in/telebot.v3"
 )
 
-const (
-	githubToken    = "some_github_token"
-	telegramToken  = "some_telegram_token"
-	owner          = "DaniilZ77"
-	repo           = "notes_spbu"
-	branch         = "notes_without_changes"
-	fileNameSuffix = "_lectures.pdf"
-	calculus       = "Матан"
-	algebra        = "Алгебра"
-	discrete       = "Дискретка"
-	algorithms     = "Алгосы"
-	homeButtonText = "Назад"
-)
-
-var extensionsToLookFor = []string{
-	".pdf",
-}
-
-var subjectsToPathMap = map[string]string{
-	algebra:    "algebra",
-	calculus:   "matan",
-	discrete:   "discrete",
-	algorithms: "algorithms",
-}
-
 type BotFile struct {
 	dir  string
 	name string
 }
 
 func checkExtensions(file string) bool {
-	for _, ext := range extensionsToLookFor {
+	for _, ext := range Cfg.ExtensionsToLookFor {
 		if strings.HasSuffix(file, ext) {
 			return true
 		}
@@ -52,11 +28,25 @@ func checkExtensions(file string) bool {
 	return false
 }
 
+func findSubject(name string) (string, bool) {
+	for _, subject := range Cfg.Subjects {
+		if subject.Name[0] == name {
+			return subject.Name[1], true
+		}
+	}
+	return "", false
+}
+
+const (
+	homeButtonText = "Назад"
+	baseName       = "start.pdf"
+)
+
 func handleStartMessage(c tele.Context) error {
-	algebra := tele.ReplyButton{Text: algebra}
-	calculus := tele.ReplyButton{Text: calculus}
-	discrete := tele.ReplyButton{Text: discrete}
-	algorithms := tele.ReplyButton{Text: algorithms}
+	algebra := tele.ReplyButton{Text: Cfg.Subjects[0].Name[0]}
+	calculus := tele.ReplyButton{Text: Cfg.Subjects[1].Name[0]}
+	discrete := tele.ReplyButton{Text: Cfg.Subjects[2].Name[0]}
+	algorithms := tele.ReplyButton{Text: Cfg.Subjects[3].Name[0]}
 
 	replyButtons := [][]tele.ReplyButton{
 		{algebra, calculus},
@@ -76,12 +66,15 @@ func handleStartMessage(c tele.Context) error {
 	return nil
 }
 
-func getContents(ctx context.Context, client *github.Client, bf *BotFile, doRequestDir bool) (*github.RepositoryContent, []*github.RepositoryContent, error) {
+func getContents(ctx context.Context, client *github.Client, bf *BotFile, doesRequestDir bool) (*github.RepositoryContent, []*github.RepositoryContent, error) {
+	fmt.Println("Запрашивание контента: " + bf.dir + ", " + bf.name)
 	path := filepath.Join(bf.dir, bf.name)
-	if doRequestDir {
-		path = filepath.Dir(bf.dir)
+	if doesRequestDir {
+		path = filepath.Dir(path)
 	}
-	fileContent, directoryContent, _, err := client.Repositories.GetContents(ctx, owner, repo, path, &github.RepositoryContentGetOptions{Ref: branch})
+	log.Println("Запрашивается папка? :", doesRequestDir)
+	log.Println("Запрашивается контент по пути: " + path)
+	fileContent, directoryContent, _, err := client.Repositories.GetContents(ctx, Cfg.GithubInfo.Owner, Cfg.GithubInfo.Repo, path, &github.RepositoryContentGetOptions{Ref: Cfg.GithubInfo.Branch})
 	if err != nil {
 		log.Println("Ошибка доступа к файлу: " + path)
 		log.Println(err)
@@ -92,10 +85,10 @@ func getContents(ctx context.Context, client *github.Client, bf *BotFile, doRequ
 
 func handleSubjectMessageHelper(ctx context.Context, c tele.Context, bot *tele.Bot, bf *BotFile, client *github.Client) error {
 	var ok bool
-	bf.dir, ok = subjectsToPathMap[c.Text()]
+	bf.dir, ok = findSubject(c.Text())
 
 	if !ok {
-		log.Printf("Запросили предмет, которого не существует: %s\n", bf.dir)
+		log.Printf("Запросили предмет, которого не существует: " + bf.dir)
 		_, err := bot.Send(c.Sender(), "Такого предмета не существует")
 		if err != nil {
 			log.Println("Ошибка отправки сообщения: " + err.Error())
@@ -144,7 +137,7 @@ func handleSubjectMessageHelper(ctx context.Context, c tele.Context, bot *tele.B
 }
 
 func handleGetFileMessage(ctx context.Context, c tele.Context, bot *tele.Bot, bf *BotFile, client *github.Client) error {
-	text := c.Text()
+	bf.name = c.Text()
 	fileContent, _, err := getContents(ctx, client, bf, false)
 	if err != nil {
 		log.Println("Ошибка получения контента из репозитория: " + err.Error())
@@ -179,7 +172,7 @@ func handleGetFileMessage(ctx context.Context, c tele.Context, bot *tele.Bot, bf
 		return err
 	}
 
-	fileName := filepath.Join(bf.dir, text)
+	fileName := filepath.Join(bf.dir, bf.name)
 
 	pdf := &tele.Document{
 		File:     tele.FromDisk(tempFile.Name()),
@@ -206,7 +199,7 @@ func handleMessage(ctx context.Context, bot *tele.Bot, bf *BotFile, client *gith
 		message := c.Text()
 		var err error
 
-		if _, ok := subjectsToPathMap[message]; ok {
+		if _, ok := findSubject(message); ok {
 			err = handleSubjectMessageHelper(ctx, c, bot, bf, client)
 		} else if checkExtensions(message) {
 			err = handleGetFileMessage(ctx, c, bot, bf, client)
@@ -216,17 +209,19 @@ func handleMessage(ctx context.Context, bot *tele.Bot, bf *BotFile, client *gith
 }
 
 func main() {
+	ReadConfig()
+
 	ctx := context.Background()
 
 	ts := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: githubToken},
+		&oauth2.Token{AccessToken: Cfg.GithubInfo.Token},
 	)
 
 	tc := oauth2.NewClient(ctx, ts)
 	client := github.NewClient(tc)
 
 	preferences := tele.Settings{
-		Token:  telegramToken,
+		Token:  Cfg.TelegramToken,
 		Poller: &tele.LongPoller{Timeout: 10 * time.Second},
 	}
 
@@ -237,6 +232,7 @@ func main() {
 	}
 
 	bf := new(BotFile)
+	bf.name = baseName
 
 	bot.Handle("/start", handleStartMessage)
 	bot.Handle("Назад", handleStartMessage)
